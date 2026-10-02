@@ -1,0 +1,124 @@
+//@version=6
+strategy("Multi-Timeframe Entry Strategy (Long/Short)", shorttitle="MTF Strategy", overlay=true)
+
+
+profit_percent = input.float(0.1, title="Take Profit (%)") / 100
+loss_percent = input.float(0.2, title="Stop Loss (%)") / 100
+len_ema_fast = input.int(5, title="1m EMA Fast Length", minval=1)
+len_ema_slow = input.int(60, title="1m EMA Slow Length", minval=1)
+len_rsi = input.int(7, title="RSI Length (1m/3m)", minval=1)
+len_macd_fast = input.int(7, title="MACD Fast Length (1m)", minval=1)
+len_macd_slow = input.int(26, title="MACD Slow Length (1m)", minval=1)
+len_macd_sig = input.int(9, title="MACD Signal Length (1m)", minval=1)
+len_ske = input.int(7, title="Stochastic K Length (10m)", minval=1)
+smooth_ske = input.int(3, title="Stochastic D Length (10m)", minval=1) 
+rsi_level_long = input.float(52.0, title="RSI Long Level (1m/3m)")
+rsi_level_short = input.float(42.0, title="RSI Short Level (1m/3m)")
+input_leverage = input.int(10, title="Leverage Multiplier", minval=1)
+input_position_mode = input.string("Cross", title="Position Mode (Cross/Isolated)")
+
+
+limit_offset_percent = input.float(0.0001, title="Limit Order Offset (%)", tooltip="0%에 가까울수록 즉시 체결 가능성이 높고 Post Only 기능이 필요합니다.") / 100 
+quantity = input.float(10.0, title="Order Quantity (e.g., USD)", minval=0.01) 
+
+post_only_enabled = input.bool(true, title="Enable Post Only")
+
+
+[close_1m, ema_fast_1m, ema_slow_1m, rsi_1m] = 
+  request.security(syminfo.tickerid, "1", 
+    [close,
+     ta.ema(close, len_ema_fast), 
+     ta.ema(close, len_ema_slow), 
+     ta.rsi(close, len_rsi)], 
+    lookahead=barmerge.lookahead_on)
+
+
+[macd_line_1m, signal_1m, hist_1m] = ta.macd(close_1m, len_macd_fast, len_macd_slow, len_macd_sig)
+    
+
+long_cond_1m = (ema_fast_1m > ema_slow_1m) and (macd_line_1m > 0) and (rsi_1m > rsi_level_long)
+short_cond_1m = (ema_fast_1m < ema_slow_1m) and (macd_line_1m < 0) and (rsi_1m < rsi_level_short)
+
+
+
+
+[rsi_3m] = 
+  request.security(syminfo.tickerid, "3", 
+    [ta.rsi(close, len_rsi)], 
+    lookahead=barmerge.lookahead_on)
+    
+
+long_cond_3m = rsi_3m > rsi_level_long
+short_cond_3m = rsi_3m < rsi_level_short
+
+
+
+[k_10m, d_10m] = 
+  request.security(syminfo.tickerid, "10", 
+    [ta.stoch(close, high, low, len_ske), 
+     ta.sma(ta.stoch(close, high, low, len_ske), smooth_ske)], 
+    lookahead=barmerge.lookahead_on)
+    
+
+long_cond_10m = ta.crossover(k_10m, d_10m)
+short_cond_10m = ta.crossunder(k_10m, d_10m) 
+
+
+
+[close_1h, open_1h] = 
+  request.security(syminfo.tickerid, "60", 
+    [close, open], 
+    lookahead=barmerge.lookahead_on)
+    
+
+long_cond_1h = close_1h > open_1h 
+short_cond_1h = close_1h < open_1h 
+
+long_entry = long_cond_1m and long_cond_3m and long_cond_10m
+short_entry = short_cond_1m and short_cond_3m and short_cond_10m
+
+
+
+
+
+limit_price_long = close * (1 - limit_offset_percent) 
+take_profit_long = close * (1 + profit_percent)
+stop_loss_long = close * (1 - loss_percent)
+
+
+limit_price_short = close * (1 + limit_offset_percent)
+take_profit_short = close * (1 - profit_percent)
+stop_loss_short = close * (1 + loss_percent)
+
+
+long_msg = '{"symbol": "{{ticker}}", "side": "BUY", "type": "LIMIT", "quantity": ' + str.tostring(quantity) + ',' + '"price": ' + str.tostring(limit_price_long) + ',' + '"tp": ' + str.tostring(take_profit_long) + ',' + '"sl": ' + str.tostring(stop_loss_long) + ',' + (post_only_enabled ? '"post_only": true' : '"post_only": false') + '"leverage": ' + str.tostring(input_leverage) + ',' + '"positionMode": "' + input_position_mode + '"' + '}' 
+
+
+short_msg = '{"symbol": "{{ticker}}", "side": "SELL", "type": "LIMIT", "quantity": ' + str.tostring(quantity) + ',' + '"price": ' + str.tostring(limit_price_short) + ',' + '"tp": ' + str.tostring(take_profit_short) + ',' + '"sl": ' + str.tostring(stop_loss_short) + ',' + (post_only_enabled ? '"post_only": true' : '"post_only": false') + '"leverage": ' + str.tostring(input_leverage) + ',' + '"positionMode": "' + input_position_mode + '"' + '}' 
+          
+if long_entry
+    alert(long_msg, alert.freq_once_per_bar)
+
+if short_entry
+    alert(short_msg, alert.freq_once_per_bar)
+
+
+
+
+if long_entry
+    strategy.order(id="Long", direction=strategy.long, qty=1, limit=limit_price_long, stop=na, oca_name="", comment="")
+else if short_entry
+    strategy.order(id="Short", direction=strategy.short, qty=1, limit=limit_price_short, stop=na, oca_name="", comment="")
+
+
+profit_ticks = math.round((close * profit_percent) / syminfo.mintick)
+loss_ticks = math.round((close * loss_percent) / syminfo.mintick)
+
+
+strategy.exit(id="Exit Long", from_entry="Long", 
+             profit=profit_ticks, // +5% 익절
+             loss=loss_ticks)    // -10% 손절
+
+strategy.exit(id="Exit Short", from_entry="Short", 
+             profit=profit_ticks, // +5% 익절
+             loss=loss_ticks)    // -10% 손절
